@@ -1,0 +1,537 @@
+---
+title: "STA 141A Course Project"
+author: "Priyanshi Singh"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    code_folding: show
+    df_print: paged
+    number_sections: true
+    css: "styles.css"
+---
+<br>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(tidyverse)
+library(caret) 
+library(xgboost)
+library(pROC)
+library(plotly)
+library(DT)
+```
+
+## Abstract
+
+Neural activity plays a crucial role in decision-making, particularly in processing sensory information to guide behavior. This study analyzes neural spike data from 4 mice across 18 experimental sessions in a visual discrimination task. By examining the relationship between contrast levels, neural responses, and trial outcomes, we aim to identify predictive neural patterns. Through exploratory data analysis, data integration, and machine learning, we investigate how neural activity influences decision-making and assess the role of different brain regions in perceptual processing.
+
+
+<br>
+
+## Introduction
+
+Perceptual decision-making is a fundamental cognitive process where sensory information is integrated to guide behavior. In visual discrimination tasks, the brain processes contrasting stimuli and generates motor responses based on perceived differences. Understanding the neural mechanisms underlying these decisions is crucial in neuroscience.
+
+This project analyzes neural activity recorded from mice performing a contrast-based decision-making task, using a subset of data from Steinmetz et al. (2019). The dataset includes neural spike trains from four mice across 18 sessions, where mice viewed visual stimuli on two screens and used a wheel to indicate their decision. The contrast levels of the stimuli varied, and mice received feedback (success or failure) based on their responses. Neural activity was recorded from different brain regions, particularly the visual cortex, to examine how neural signals correlate with decision-making.
+
+Our objective is to build a predictive model that determines trial outcomes based on neural activity. The analysis will follow three key phases:
+
+* **Exploratory Data Analysis (EDA)** – Investigating dataset structure, neural activity patterns, and behavioral responses.
+* **Data Integration** – Combining trial data across sessions to construct a unified dataset.
+* **Predictive Modeling** – Using statistical and machine learning techniques to predict trial success based on spike train data and contrast asymmetry.
+
+By identifying neural patterns that differentiate successful and unsuccessful trials, we aim to assess the predictive power of neural activity in decision-making. This study contributes to a deeper understanding of how sensory information is encoded and used by the brain to guide behavior.
+
+<br>
+
+## Exploratory Data Analysis 
+
+<br>
+
+Looking at the features of the datasets for each mice, there are 6 variables for each trial: 
+
+* **feedback_type:** This variable stores the behavioral outcome of each trial, where 1 represents success (the mouse steers toward the lower contrast side or holds the wheel steady when contrasts are equal) and -1 represents failure
+* **contrast_left:** This variable correlates to the contrast level of the stimulus presented in the left visual field, with possible values of 0, 0.25, 0.5, and 1.
+* **contrast_right:** This variable also correlates to the contrast level of the stimulus presented in the right visual field, with the same possible values as contrast_left.
+* **time:** The time bin within a trial during which the spike counts were recorded
+* **spks:** The spike count recorded from neurons within the visual cortex and associated brain regions during a given time bin
+* **brain_area:** The brain region from which the recorded neuron is located. The dataset includes multiple regions, such as ACA, CA3, DG, LS, MOs, root, SUB, and VISp.
+
+```{r, include = F}
+#importing data + viewing first few rows of each dataset
+session=list()
+for(i in 1:18){
+  session[[i]]=readRDS(paste('./Data/session',i,'.rds',sep=''))
+}
+
+lapply(session, summary) 
+ls(session[[1]])
+```
+
+```{r, include = F}
+summary(session[[1]]$brain_area)
+table(session[[1]]$brain_area)
+```
+
+<br>
+
+**Summary of the Data Sessions**
+
+In the table below, we get a basic overview of each of the trial sessions. The mouse_name column and the date_exp column correspond to the dates that the mice went through the session. The num_trial variable corresponds to the amount on trials the mouse went through per session and this number varies from session to session, and from mouse to mouse. The num_neurons column corresponds to the total number of recorded neurons active per session, per mouse. The num_brain_areas variable is the number of unique brain areas recorded per session for each mouse. The last two variables, num_feedback_types and num_stimuli_conditions are constant and stay at values of 2 and 4 correctly as there are only 2 types of feedback each session can have (a 1 for success or a -1 for failure) and only 4 possible stimuli conditions across all sessions (0, 0.25, 0.5, 1). 
+
+<details>
+  <summary><strong>Click to View Summary of the Data Sessions</strong></summary>
+  
+```{r summary_table, echo = F}
+  #converting sessions into a dataframe
+  session_dfs <- lapply(session, function(x) {
+    data.frame(
+      mouse_name = x$mouse_name,
+      date_exp = x$date_exp,
+      num_trials = length(x$contrast_left),
+      num_neurons = length(x$brain_area),  # Total recorded neurons
+      num_brain_areas = length(unique(x$brain_area)),  # Unique brain areas
+      num_feedback_types = length(unique(x$feedback_type)),  # Unique feedback
+      # Unique stimulus values
+      num_stimuli_conditions = length(unique(c(x$contrast_left, x$contrast_right)))
+    )
+  })
+  session_summary <- do.call(rbind, session_dfs)
+  datatable(session_summary, options = list(scrollX = TRUE))
+  # everything together
+  #all_sessions_df <- do.call(rbind, session_dfs)
+```
+</details>
+
+<br>
+
+**Data Structure Plots**
+
+Furthermore, the plots below illustrate the variability in the number of trials, recorded neurons, and activated brain areas across sessions and mice.
+
+The first plot shows the number of trials per session. Notably, the mouse Lederberg has significantly more sessions—and therefore more trials—than the other mice, which could introduce bias into the model. Cori appears to have the least amount of trials, which is also important to recognize within for the model. The second plot examines the number of recorded neurons per session. While most sessions fall within a similar range, session 4 for Forssmann stands out with a substantially higher neuron count. This may be an outlier and should be considered when building the model. Additionally, Lederberg’s larger number of sessions suggests he also has more neurons recorded overall. The final plot visualizes the number of brain areas activated per session. Cori and Forssmann appear to have fewer recorded brain areas compared to Hench and Lederberg. However, Lederberg’s increased session count likely contributes to his higher number of recorded brain areas. Also, Hench seems to have a higher number of brain areas recorded comparatively throughout his sessions while the other mice seem to fluctuate more. 
+
+<details>
+  <summary><strong>Click to View Data Structure Plots</strong></summary>
+  
+```{r trials_plots, echo = F}
+  #visualizations 
+  # Plot number of trials per session
+  ggplot(session_summary, aes(x = as.factor(1:nrow(session_summary)), y = num_trials, fill = mouse_name)) +
+    geom_bar(stat = "identity") +
+    labs(title = "Number of Trials per Session",
+         x = "Session ID", y = "Number of Trials") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  # Plot number of neurons per session
+  ggplot(session_summary, aes(x = as.factor(1:nrow(session_summary)), y = num_neurons, fill = mouse_name)) +
+    geom_bar(stat = "identity") +
+    labs(title = "Number of Neurons Recorded per Session",
+         x = "Session ID", y = "Number of Neurons") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  # Number of brain areas per session
+  ggplot(session_summary, aes(x = as.factor(1:nrow(session_summary)), y = num_brain_areas, fill = mouse_name)) +
+    geom_bar(stat = "identity") +
+    labs(title = "Number of Brain Areas Recorded per Session",
+         x = "Session ID", y = "Number of Brain Areas") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+</details>
+
+<br>
+
+**Stimulus Conditions Analysis**
+
+The following plots illustrate the frequency and success rates of different stimulus contrast combinations across all mice. To interpret these plots, note that each point represents a specific contrast pair tested during the experiment, and the size of the blue circles indicates the number of successful trials for that contrast combination. Larger circles correspond to higher success rates.
+
+A key observation is that the 0-0 contrast condition (where the mouse kept the wheel centered) was the most successful across all mice. Additionally, mice generally performed better when the contrast difference between the left and right visual fields was greater. For instance, Lederberg, who has the most trials, shows a clear pattern where success rates are lower when contrast values are similar (e.g., 0.25 vs. 0.5) and higher when contrast differences are more pronounced. This trend is consistent across all mice.
+
+Interestingly, Cori appears to have a more evenly distributed success rate across contrast conditions, though this may be influenced by having fewer trials overall compared to other mice.
+
+The count plot further confirms that the 0-0 stimulus was tested most frequently, as expected for a neutral baseline condition. The second most common stimulus combination was right contrast = 0.25 and left contrast = 1.0, which was tested significantly more than other contrast pairs. This imbalance in stimulus distribution could introduce potential biases in the predictive model, which should be considered in further analysis. 
+
+<details>
+  <summary><strong>Click to View the Stimulus Conditions Plot</strong></summary>
+```{r stim_constrasts, echo = F}
+# 2. Examine stimulus conditions across sessions
+# Function to extract stimulus combinations
+get_stimulus_combinations <- function(session_data) {
+  combos <- table(session_data$contrast_left, session_data$contrast_right)
+  return(as.data.frame.matrix(combos))
+}
+
+# Get the stimulus combinations for the first session as an example
+stimulus_table <- get_stimulus_combinations(session[[1]])
+print(stimulus_table)
+
+# Visualize distribution of contrast combinations across all sessions
+all_contrasts <- data.frame()
+for(i in 1:length(session)) {
+  temp <- data.frame(
+    session_id = i,
+    mouse_name = session[[i]]$mouse_name,
+    contrast_left = session[[i]]$contrast_left,
+    contrast_right = session[[i]]$contrast_right,
+    feedback = session[[i]]$feedback_type
+  )
+  all_contrasts <- rbind(all_contrasts, temp)
+}
+
+# Plot distribution of contrast combinations
+ggplot(all_contrasts, aes(x = factor(contrast_left), y = factor(contrast_right))) +
+  geom_count(aes(color = factor(feedback))) +
+  facet_wrap(~mouse_name) +
+  labs(title = "Distribution of Contrast Combinations by Mouse",
+       x = "Left Contrast", y = "Right Contrast",
+       color = "Feedback") +
+  theme_minimal()
+```
+</details>
+
+<br>
+
+**Feedback Analysis**
+
+The plot below illustrates the consistency of success rates across mice. In general, Cori exhibited the least consistent success and the lowest average success, followed by Forssmann, Hench, and finally Lederberg, who had the most stable performance. However, it is important to note that Lederberg had the highest number of trials, while Cori had the fewest. Additionally, Cori and Hench showed an overall improvement in success rates over time, whereas Forssmann and Lederberg demonstrated more fluctuation throughout the sessions but had higher success rates.
+
+<details>
+  <summary><strong>Click to View Feedback Analysis Plot</strong></summary>
+```{r feedback_analy, echo = F}
+feedback_summary <- all_contrasts %>%
+  group_by(session_id, mouse_name) %>%
+  summarize(
+    success_rate = mean(feedback == 1),
+    total_trials = n()
+  )
+
+# Plot success rates by session
+ggplot(feedback_summary, aes(x = as.factor(session_id), y = success_rate, fill = mouse_name)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Success Rate by Session",
+       x = "Session ID", y = "Success Rate",
+       fill = "Mouse") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+</details>
+
+<br>
+
+**Neural Activity Analysis**
+
+This plot displays spike rates by brain area, colored according to whether the session was successful. There isn't a clear, distinct pattern linking specific brain areas to success, suggesting that decision-making likely involves multiple regions rather than a single area. While there are several outliers, one notable observation is the high spike rate in the RN area, which also shows a relatively good trial outcome. Other areas with higher average trial outcomes include CA1, LSr, PO, RN, SCs, and SB. These areas may play a key role in predicting session outcomes and could be important for model development.
+
+<details>
+  <summary><strong>Click to View & Interact with Neural Activity Analysis Plot</strong></summary>
+```{r neural_act_analy, echo = F}
+analyze_trial_spikes <- function(session_idx, trial_idx, all_brain_areas) {
+  session_data <- session[[session_idx]]
+  trial_spikes <- session_data$spks[[trial_idx]]
+  brain_areas <- session_data$brain_area
+  
+  # Get unique brain areas in this session
+  unique_areas <- unique(brain_areas)
+  
+  # Calculate average spike rate by brain area
+  area_rates <- sapply(unique_areas, function(area) {
+    area_neurons <- which(brain_areas == area)
+    mean(rowMeans(trial_spikes[area_neurons, ]))
+  })
+  
+  # Create a result data frame
+  result <- data.frame(
+    session_id = session_idx,
+    trial_id = trial_idx,
+    mouse_name = session_data$mouse_name,
+    contrast_left = session_data$contrast_left[trial_idx],
+    contrast_right = session_data$contrast_right[trial_idx],
+    feedback = session_data$feedback_type[trial_idx]
+  )
+  
+  # Ensure all brain areas exist in the data frame, even if missing
+  for (area in all_brain_areas) {
+    result[[paste0("rate_", area)]] <- ifelse(area %in% unique_areas, area_rates[area], NA)
+  }
+  
+  return(result)
+}
+
+# Identify all brain areas across all sessions
+all_brain_areas <- unique(unlist(lapply(session, function(s) s$brain_area)))
+
+# Analyze a sample of trials from each session
+set.seed(141)
+sample_trials <- data.frame()
+
+for(i in 1:length(session)) {
+  num_trials <- length(session[[i]]$contrast_left)
+  selected_trials <- sample(1:num_trials, min(10, num_trials))
+  
+  for(j in selected_trials) {
+    trial_data <- analyze_trial_spikes(i, j, all_brain_areas)
+    sample_trials <- rbind(sample_trials, trial_data)
+  }
+}
+
+# Get all brain areas that appear in the data
+brain_area_cols <- names(sample_trials)[grepl("^rate_", names(sample_trials))]
+brain_areas <- gsub("^rate_", "", brain_area_cols)
+
+# Reshape the data for visualization
+sample_trials_long <- sample_trials %>%
+  pivot_longer(
+    cols = all_of(brain_area_cols),
+    names_to = "brain_area",
+    values_to = "spike_rate"
+  ) %>%
+  mutate(brain_area = gsub("^rate_", "", brain_area))
+
+# Plot average spike rates by brain area with interactivity
+ggplot_sample_trials_long <- ggplot(sample_trials_long, aes(x = brain_area, y = spike_rate, fill = factor(feedback))) +
+  geom_boxplot() +
+  labs(title = "Average Spike Rate by Brain Area and Trial Outcome",
+       x = "Brain Area", y = "Average Spike Rate",
+       fill = "Feedback") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Convert to a plotly interactive plot
+ggplotly(ggplot_sample_trials_long)
+```
+
+</details>
+
+<br>
+
+
+**Mouse-to-Mouse Variation**
+
+This plot illustrates the differences in neural responses across mice, helping to identify whether certain mice consistently show higher activity in specific brain regions. Although the pattern is not immediately clear, it appears that Cori and Lederberg exhibit more neural activity across regions compared to Forssman and Hench, as indicated by more frequent and higher intensity red and purple spikes in the plot. This could be influenced by factors such as insert factors here. Interestingly, Hench shows more activity in certain regions, such as VISrl. This analysis accounts for individual variation among the mice to determine if naturally higher activity levels might influence their performance in stimulus success outcomes.
+
+<details>
+  <summary><strong>Click to View the Mouse to Mouse Plot</strong></summary>
+```{r mouse2mouse, echo = F}
+mouse_area_rates <- sample_trials_long %>%
+  group_by(mouse_name, brain_area) %>%
+  summarize(
+    avg_rate = mean(spike_rate, na.rm = TRUE),
+    sd_rate = sd(spike_rate, na.rm = TRUE)
+  )
+
+# Plot average spike rates by mouse and brain area
+ggplot(mouse_area_rates, aes(x = brain_area, y = avg_rate, fill = mouse_name)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_errorbar(aes(ymin = avg_rate - sd_rate, ymax = avg_rate + sd_rate), 
+                position = position_dodge(0.9), width = 0.25) +
+  labs(title = "Average Spike Rates by Mouse and Brain Area",
+       x = "Brain Area", y = "Average Spike Rate",
+       fill = "Mouse") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+</details>
+
+<br>
+
+
+**Stimuli and Success Rate**
+
+The heatmap below displays the success rates based on the contrast combinations of stimuli. From this heatmap, we can observe that the combinations with the highest success rates are those with larger contrast differences, which mirrors the findings from the stimulus condition analysis plot. For example, combinations such as 0.5 & 0, 1 & 0, and 0.25 & 1 all have success rates ranging from 0.7 to 0.85. In contrast, combinations with smaller contrast differences, such as 0.5 & 0.25, show a lower success rate of around 0.63, regardless of whether the higher contrast is on the left or right side. This suggests that a greater difference between contrasts leads to a higher success rate in mice.
+
+An interesting pattern observed in the heatmap is that mice tend to have a higher success rate when the higher contrast is presented on the left side, rather than the right. For instance, when the left stimulus is set to 1 and the right stimulus is set to 0, the success rate is 0.84, while the inverse (left at 0 and right at 1) results in a success rate of 0.75. This difference highlights an interesting trend in how contrast orientation may affect the mice's ability to succeed in the task.
+
+<details>
+  <summary><strong>Click to View the Heatmap</strong></summary>
+```{r heatmape, echo = F}
+stimuli_success <- all_contrasts %>%
+  group_by(contrast_left, contrast_right) %>%
+  summarize(
+    success_rate = mean(feedback == 1),
+    trial_count = n()
+  )
+
+# Plot success rate by contrast combination
+ggplot(stimuli_success, aes(x = factor(contrast_left), y = factor(contrast_right), fill = success_rate)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  geom_text(aes(label = sprintf("%.2f\n(n=%d)", success_rate, trial_count)), size = 3) +
+  labs(title = "Success Rate by Contrast Combination",
+       x = "Left Contrast", y = "Right Contrast",
+       fill = "Success Rate") +
+  theme_minimal()
+```
+
+</details>
+
+<br>
+
+
+**Overview of EDA**
+
+The EDA examines the behavioral and neural data from the mice, focusing on key variables such as trial feedback, contrast conditions, spike counts, and brain areas. Based on all the above plots and tables, we made a few key insights regarding the data:
+
+* Session Summary: Mouse trial counts, recorded neurons, and activated brain areas varied across sessions. Lederberg had the most trials, while Cori had the fewest, which could lead to bias in modeling.
+
+* Data Structure Plots: The number of trials, neurons, and brain areas across sessions showed variability, highlighting potential data imbalances, particularly for Lederberg.
+
+* Stimulus Conditions: Larger contrast differences between the left and right visual fields led to higher success rates. The 0-0 contrast condition was the most successful overall.
+
+* Feedback: Cori showed inconsistent success but improved, while Lederberg’s performance was fluctuating but the highest. This indicates variability in task consistency among the mice.
+
+* Neural Activity: No single brain region was strongly linked to success, suggesting that multiple brain areas contribute to decision-making.
+
+* Mouse-to-Mouse Variation: Neural responses varied across mice, with some regions showing more activity, which could influence success rates.
+
+* Stimulus & Success Rate: Higher contrast differences, especially with the higher contrast on the left, correlated with better success rates.
+
+For our next steps, we will use these key findings to combine data from multiple sessions, addressing variations in trials, neurons, and brain areas.
+
+
+
+## Data Integration
+
+As we move into the data integration part of this project, there are key considerations to keep in mind such as the variance in number of trials, neurons, sessions, brain areas recorded. As mentioned before, Lederberg had significantly more trials and brain areas recorded, while Cori had fewer. This variability needs to be addressed to ensure that the model is not biased by the quantity of data from any particular mouse. Another key consideration is the difference in the variables and the availability of those variables. The distribution of the variables (such as the constrast combination counts, or the brain areas) varies across trials and sessions, which could introduce bias. The integration process should account for these differences. Lastly, it is important to consider that based on the plots seen from EDA, that different brain areas were activated across mice, and some regions showed more neural activity than others. Integrating this neural data will require identifying patterns across sessions and aligning them, despite the differences in brain areas across mice. 
+
+*(Describe approach to combine sessions and extract useful patterns.)*
+
+```{r}
+# Function to extract features from each trial
+extract_trial_features <- function(session_data, session_id, trial_id) {
+  # Extract trial-specific data
+  trial_contrast_left <- session_data$contrast_left[trial_id]
+  trial_contrast_right <- session_data$contrast_right[trial_id]
+  trial_feedback <- session_data$feedback_type[trial_id]
+  
+  # Extract spike data for this trial
+  spks_trial <- session_data$spks[[trial_id]]
+  
+  # Calculate contrast difference (a potentially useful feature)
+  contrast_diff <- trial_contrast_left - trial_contrast_right
+  
+  # Calculate average spike rate per neuron across all time bins
+  avg_spikes_per_neuron <- rowMeans(spks_trial)
+  
+  # Calculate total spikes per brain area
+  brain_areas <- unique(session_data$brain_area)
+  area_spikes <- sapply(brain_areas, function(area) {
+    area_neurons <- which(session_data$brain_area == area)
+    if(length(area_neurons) > 0) {
+      sum(avg_spikes_per_neuron[area_neurons])
+    } else {
+      0
+    }
+  })
+  
+  # Create a named vector for brain area spikes
+  names(area_spikes) <- brain_areas
+  
+  # Create a data frame with the extracted features
+  trial_features <- data.frame(
+    session_id = session_id,
+    trial_id = trial_id,
+    mouse_name = session_data$mouse_name,
+    contrast_left = trial_contrast_left,
+    contrast_right = trial_contrast_right,
+    contrast_diff = contrast_diff,
+    feedback = trial_feedback,
+    total_spikes = sum(spks_trial),
+    max_spikes = max(colSums(spks_trial)),  # Maximum spikes in any time bin
+    time_to_max = which.max(colSums(spks_trial))  # Time bin with maximum activity
+  )
+  
+  # Add brain area specific features
+  for(area in brain_areas) {
+    col_name <- paste0("spikes_", area)
+    trial_features[[col_name]] <- area_spikes[area]
+  }
+  
+  return(trial_features)
+}
+
+# Process all sessions and trials
+all_trials_features <- data.frame()
+
+for(session_id in 1:length(session)) {
+  session_data <- session[[session_id]]
+  num_trials <- length(session_data$contrast_left)
+  
+  # Process each trial in the session
+  for(trial_id in 1:num_trials) {
+    trial_features <- extract_trial_features(session_data, session_id, trial_id)
+    all_trials_features <- rbind(all_trials_features, trial_features)
+  }
+  
+  # Print progress
+  cat("Processed session", session_id, "with", num_trials, "trials\n")
+}
+
+# Examine the structure of the integrated dataset
+str(all_trials_features)
+
+# Check for missing values
+missing_values <- colSums(is.na(all_trials_features))
+print(missing_values[missing_values > 0])
+
+# Standardize numeric features for modeling
+feature_cols <- names(all_trials_features)[!names(all_trials_features) %in% 
+                                         c("session_id", "trial_id", "mouse_name", "feedback")]
+all_trials_features_scaled <- all_trials_features
+all_trials_features_scaled[feature_cols] <- scale(all_trials_features[feature_cols])
+
+# Visualizations
+
+# Examine distribution of trials by feedback type
+ggplot(all_trials_features, aes(x = factor(feedback))) +
+  geom_bar(fill = "steelblue") +
+  labs(title = "Distribution of Trial Outcomes",
+       x = "Feedback Type", y = "Count") +
+  theme_minimal()
+
+# Examine distribution of trials by mouse
+ggplot(all_trials_features, aes(x = mouse_name, fill = factor(feedback))) +
+  geom_bar(position = "dodge") +
+  labs(title = "Trial Outcomes by Mouse",
+       x = "Mouse Name", y = "Count",
+       fill = "Feedback Type") +
+  theme_minimal()
+
+# Save the integrated dataset for modeling
+saveRDS(all_trials_features, "integrated_trial_features.rds")
+saveRDS(all_trials_features_scaled, "integrated_trial_features_scaled.rds")
+
+```
+
+<br>
+
+## Predictive Modeling
+
+*(Describe modeling approach and justify choice of algorithms.)*
+
+<br>
+
+## Prediction Performance
+
+*(Evaluate model performance on test sets.)*
+
+<br>
+
+## Discussion
+
+*(Summarize key findings, challenges, and future improvements.)*
+
+
+#### References
+Article: https://www.nature.com/articles/s41586-019-1787-x
+Used AI to help with code and content: 
