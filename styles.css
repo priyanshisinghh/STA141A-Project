@@ -1,0 +1,18 @@
+body {
+    padding-top: 100px; /* Adjust this value as needed */
+}
+
+h1 {
+    counter-reset: section -1; /* Start numbering at 0 */
+}
+h2 {
+    counter-reset: subsection;
+}
+h1.numbered:before {
+    counter-increment: section;
+    content: counter(section) ". ";
+}
+h2.numbered:before {
+    counter-increment: subsection;
+    content: counter(subsection) ". ";
+}

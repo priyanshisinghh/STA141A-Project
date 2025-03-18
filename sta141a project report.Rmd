@@ -1,0 +1,908 @@
+---
+title: "STA 141A Course Project"
+author: "Priyanshi Singh"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    code_folding: show
+    df_print: paged
+    number_sections: true
+    css: "styles.css"
+---
+<br>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(tidyverse)
+library(caret) 
+library(xgboost)
+library(pROC)
+library(plotly)
+library(DT)
+library(randomForest)
+```
+
+## Abstract
+
+Neural activity plays a crucial role in decision-making, particularly in processing sensory information to guide behavior. This study analyzes neural spike data from 4 mice across 18 experimental sessions in a visual discrimination task. By examining the relationship between contrast levels, neural responses, and trial outcomes, we aim to identify predictive neural patterns. Through exploratory data analysis, data integration, and machine learning, we investigate how neural activity influences decision-making and assess the role of different brain regions in perceptual processing.
+
+
+<br>
+
+## Introduction
+
+Perceptual decision-making is a fundamental cognitive process where sensory information is integrated to guide behavior. In visual discrimination tasks, the brain processes contrasting stimuli and generates motor responses based on perceived differences. Understanding the neural mechanisms underlying these decisions is crucial in neuroscience.
+
+This project analyzes neural activity recorded from mice performing a contrast-based decision-making task, using a subset of data from Steinmetz et al. (2019). The dataset includes neural spike trains from four mice across 18 sessions, where mice viewed visual stimuli on two screens and used a wheel to indicate their decision. The contrast levels of the stimuli varied, and mice received feedback (success or failure) based on their responses. Neural activity was recorded from different brain regions, particularly the visual cortex, to examine how neural signals correlate with decision-making.
+
+Our objective is to build a predictive model that determines trial outcomes based on neural activity. The analysis will follow three key phases:
+
+* **Exploratory Data Analysis (EDA)** – Investigating dataset structure, neural activity patterns, and behavioral responses.
+* **Data Integration** – Combining trial data across sessions to construct a unified dataset.
+* **Predictive Modeling** – Using statistical and machine learning techniques to predict trial success based on spike train data and contrast asymmetry.
+
+By identifying neural patterns that differentiate successful and unsuccessful trials, we aim to assess the predictive power of neural activity in decision-making. This study contributes to a deeper understanding of how sensory information is encoded and used by the brain to guide behavior.
+
+<br>
+
+## Exploratory Data Analysis 
+
+<br>
+
+Looking at the features of the datasets for each mice, there are 6 variables for each trial: 
+
+* **feedback_type:** This variable stores the behavioral outcome of each trial, where 1 represents success (the mouse steers toward the lower contrast side or holds the wheel steady when contrasts are equal) and -1 represents failure
+* **contrast_left:** This variable correlates to the contrast level of the stimulus presented in the left visual field, with possible values of 0, 0.25, 0.5, and 1.
+* **contrast_right:** This variable also correlates to the contrast level of the stimulus presented in the right visual field, with the same possible values as contrast_left.
+* **time:** The time bin within a trial during which the spike counts were recorded
+* **spks:** The spike count recorded from neurons within the visual cortex and associated brain regions during a given time bin
+* **brain_area:** The brain region from which the recorded neuron is located. The dataset includes multiple regions, such as ACA, CA3, DG, LS, MOs, root, SUB, and VISp.
+
+```{r, include = F}
+#importing data + viewing first few rows of each dataset
+session=list()
+for(i in 1:18){
+  session[[i]]=readRDS(paste('./Data/session',i,'.rds',sep=''))
+}
+
+lapply(session, summary) 
+ls(session[[1]])
+```
+
+```{r, include = F}
+summary(session[[1]]$brain_area)
+table(session[[1]]$brain_area)
+```
+
+<br>
+
+**Summary of the Data Sessions**
+
+In the table below, we get a basic overview of each of the trial sessions. The mouse_name column and the date_exp column correspond to the dates that the mice went through the session. The num_trial variable corresponds to the amount on trials the mouse went through per session and this number varies from session to session, and from mouse to mouse. The num_neurons column corresponds to the total number of recorded neurons active per session, per mouse. The num_brain_areas variable is the number of unique brain areas recorded per session for each mouse. The last two variables, num_feedback_types and num_stimuli_conditions are constant and stay at values of 2 and 4 correctly as there are only 2 types of feedback each session can have (a 1 for success or a -1 for failure) and only 4 possible stimuli conditions across all sessions (0, 0.25, 0.5, 1). 
+
+<details>
+  <summary><strong>Click to View Summary of the Data Sessions</strong></summary>
+  <br>
+```{r summary_table, echo = F}
+  #converting sessions into a dataframe
+  session_dfs <- lapply(session, function(x) {
+    data.frame(
+      mouse_name = x$mouse_name,
+      date_exp = x$date_exp,
+      num_trials = length(x$contrast_left),
+      num_neurons = length(x$brain_area),  # Total recorded neurons
+      num_brain_areas = length(unique(x$brain_area)),  # Unique brain areas
+      num_feedback_types = length(unique(x$feedback_type)),  # Unique feedback
+      # Unique stimulus values
+      num_stimuli_conditions = length(unique(c(x$contrast_left, x$contrast_right)))
+    )
+  })
+  session_summary <- do.call(rbind, session_dfs)
+  datatable(session_summary, options = list(scrollX = TRUE))
+  # everything together
+  #all_sessions_df <- do.call(rbind, session_dfs)
+```
+</details>
+
+<br>
+
+**Data Structure Plots**
+
+Furthermore, the plots below illustrate the variability in the number of trials, recorded neurons, and activated brain areas across sessions and mice.
+
+The first plot shows the number of trials per session. Notably, the mouse Lederberg has significantly more sessions—and therefore more trials—than the other mice, which could introduce bias into the model. Cori appears to have the least amount of trials, which is also important to recognize within for the model. The second plot examines the number of recorded neurons per session. While most sessions fall within a similar range, session 4 for Forssmann stands out with a substantially higher neuron count. This may be an outlier and should be considered when building the model. Additionally, Lederberg’s larger number of sessions suggests he also has more neurons recorded overall. The final plot visualizes the number of brain areas activated per session. Cori and Forssmann appear to have fewer recorded brain areas compared to Hench and Lederberg. However, Lederberg’s increased session count likely contributes to his higher number of recorded brain areas. Also, Hench seems to have a higher number of brain areas recorded comparatively throughout his sessions while the other mice seem to fluctuate more. 
+
+<details>
+  <summary><strong>Click to View Data Structure Plots</strong></summary>
+  <br>
+```{r trials_plots, echo = F}
+  #visualizations 
+  # Plot number of trials per session
+  ggplot(session_summary, aes(x = as.factor(1:nrow(session_summary)), y = num_trials, fill = mouse_name)) +
+    geom_bar(stat = "identity") +
+    labs(title = "Number of Trials per Session",
+         x = "Session ID", y = "Number of Trials") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  # Plot number of neurons per session
+  ggplot(session_summary, aes(x = as.factor(1:nrow(session_summary)), y = num_neurons, fill = mouse_name)) +
+    geom_bar(stat = "identity") +
+    labs(title = "Number of Neurons Recorded per Session",
+         x = "Session ID", y = "Number of Neurons") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  # Number of brain areas per session
+  ggplot(session_summary, aes(x = as.factor(1:nrow(session_summary)), y = num_brain_areas, fill = mouse_name)) +
+    geom_bar(stat = "identity") +
+    labs(title = "Number of Brain Areas Recorded per Session",
+         x = "Session ID", y = "Number of Brain Areas") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+</details>
+
+<br>
+
+**Stimulus Conditions Analysis**
+
+The following plots illustrate the frequency and success rates of different stimulus contrast combinations across all mice. To interpret these plots, note that each point represents a specific contrast pair tested during the experiment, and the size of the blue circles indicates the number of successful trials for that contrast combination. Larger circles correspond to higher success rates.
+
+A key observation is that the 0-0 contrast condition (where the mouse kept the wheel centered) was the most successful across all mice. Additionally, mice generally performed better when the contrast difference between the left and right visual fields was greater. For instance, Lederberg, who has the most trials, shows a clear pattern where success rates are lower when contrast values are similar (e.g., 0.25 vs. 0.5) and higher when contrast differences are more pronounced. This trend is consistent across all mice.
+
+Interestingly, Cori appears to have a more evenly distributed success rate across contrast conditions, though this may be influenced by having fewer trials overall compared to other mice.
+
+The count plot further confirms that the 0-0 stimulus was tested most frequently, as expected for a neutral baseline condition. The second most common stimulus combination was right contrast = 0.25 and left contrast = 1.0, which was tested significantly more than other contrast pairs. This imbalance in stimulus distribution could introduce potential biases in the predictive model, which should be considered in further analysis. 
+
+<details>
+  <summary><strong>Click to View the Stimulus Conditions Plot</strong></summary>
+  <br>
+```{r stim_constrasts, echo = F}
+# 2. Examine stimulus conditions across sessions
+# Function to extract stimulus combinations
+get_stimulus_combinations <- function(session_data) {
+  combos <- table(session_data$contrast_left, session_data$contrast_right)
+  return(as.data.frame.matrix(combos))
+}
+
+# Get the stimulus combinations for the first session as an example
+stimulus_table <- get_stimulus_combinations(session[[1]])
+print(stimulus_table)
+
+# Visualize distribution of contrast combinations across all sessions
+all_contrasts <- data.frame()
+for(i in 1:length(session)) {
+  temp <- data.frame(
+    session_id = i,
+    mouse_name = session[[i]]$mouse_name,
+    contrast_left = session[[i]]$contrast_left,
+    contrast_right = session[[i]]$contrast_right,
+    feedback = session[[i]]$feedback_type
+  )
+  all_contrasts <- rbind(all_contrasts, temp)
+}
+
+# Plot distribution of contrast combinations
+ggplot(all_contrasts, aes(x = factor(contrast_left), y = factor(contrast_right))) +
+  geom_count(aes(color = factor(feedback))) +
+  facet_wrap(~mouse_name) +
+  labs(title = "Distribution of Contrast Combinations by Mouse",
+       x = "Left Contrast", y = "Right Contrast",
+       color = "Feedback") +
+  theme_minimal()
+```
+</details>
+
+<br>
+
+**Feedback Analysis**
+
+The plot below illustrates the consistency of success rates across mice. In general, Cori exhibited the least consistent success and the lowest average success, followed by Forssmann, Hench, and finally Lederberg, who had the most stable performance. However, it is important to note that Lederberg had the highest number of trials, while Cori had the fewest. Additionally, Cori and Hench showed an overall improvement in success rates over time, whereas Forssmann and Lederberg demonstrated more fluctuation throughout the sessions but had higher success rates.
+
+<details>
+  <summary><strong>Click to View Feedback Analysis Plot</strong></summary>
+  <br>
+```{r feedback_analy, echo = F}
+feedback_summary <- all_contrasts %>%
+  group_by(session_id, mouse_name) %>%
+  summarize(
+    success_rate = mean(feedback == 1),
+    total_trials = n()
+  )
+
+# Plot success rates by session
+ggplot(feedback_summary, aes(x = as.factor(session_id), y = success_rate, fill = mouse_name)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Success Rate by Session",
+       x = "Session ID", y = "Success Rate",
+       fill = "Mouse") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+</details>
+
+<br>
+
+**Neural Activity Analysis**
+
+This plot displays spike rates by brain area, colored according to whether the session was successful. There isn't a clear, distinct pattern linking specific brain areas to success, suggesting that decision-making likely involves multiple regions rather than a single area. While there are several outliers, one notable observation is the high spike rate in the RN area, which also shows a relatively good trial outcome. Other areas with higher average trial outcomes include CA1, LSr, PO, RN, SCs, and SB. These areas may play a key role in predicting session outcomes and could be important for model development.
+
+<details>
+  <summary><strong>Click to View & Interact with Neural Activity Analysis Plot</strong></summary>
+  <br>
+```{r neural_act_analy, echo = F}
+analyze_trial_spikes <- function(session_idx, trial_idx, all_brain_areas) {
+  session_data <- session[[session_idx]]
+  trial_spikes <- session_data$spks[[trial_idx]]
+  brain_areas <- session_data$brain_area
+  
+  # Get unique brain areas in this session
+  unique_areas <- unique(brain_areas)
+  
+  # Calculate average spike rate by brain area
+  area_rates <- sapply(unique_areas, function(area) {
+    area_neurons <- which(brain_areas == area)
+    mean(rowMeans(trial_spikes[area_neurons, ]))
+  })
+  
+  # Create a result data frame
+  result <- data.frame(
+    session_id = session_idx,
+    trial_id = trial_idx,
+    mouse_name = session_data$mouse_name,
+    contrast_left = session_data$contrast_left[trial_idx],
+    contrast_right = session_data$contrast_right[trial_idx],
+    feedback = session_data$feedback_type[trial_idx]
+  )
+  
+  # Ensure all brain areas exist in the data frame, even if missing
+  for (area in all_brain_areas) {
+    result[[paste0("rate_", area)]] <- ifelse(area %in% unique_areas, area_rates[area], NA)
+  }
+  
+  return(result)
+}
+
+# Identify all brain areas across all sessions
+all_brain_areas <- unique(unlist(lapply(session, function(s) s$brain_area)))
+
+# Analyze a sample of trials from each session
+set.seed(141)
+sample_trials <- data.frame()
+
+for(i in 1:length(session)) {
+  num_trials <- length(session[[i]]$contrast_left)
+  selected_trials <- sample(1:num_trials, min(10, num_trials))
+  
+  for(j in selected_trials) {
+    trial_data <- analyze_trial_spikes(i, j, all_brain_areas)
+    sample_trials <- rbind(sample_trials, trial_data)
+  }
+}
+
+# Get all brain areas that appear in the data
+brain_area_cols <- names(sample_trials)[grepl("^rate_", names(sample_trials))]
+brain_areas <- gsub("^rate_", "", brain_area_cols)
+
+# Reshape the data for visualization
+sample_trials_long <- sample_trials %>%
+  pivot_longer(
+    cols = all_of(brain_area_cols),
+    names_to = "brain_area",
+    values_to = "spike_rate"
+  ) %>%
+  mutate(brain_area = gsub("^rate_", "", brain_area))
+
+# Plot average spike rates by brain area with interactivity
+ggplot_sample_trials_long <- ggplot(sample_trials_long, aes(x = brain_area, y = spike_rate, fill = factor(feedback))) +
+  geom_boxplot() +
+  labs(title = "Average Spike Rate by Brain Area and Trial Outcome",
+       x = "Brain Area", y = "Average Spike Rate",
+       fill = "Feedback") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Convert to a plotly interactive plot
+ggplotly(ggplot_sample_trials_long)
+```
+
+</details>
+
+<br>
+
+
+**Mouse-to-Mouse Variation**
+
+This plot illustrates the differences in neural responses across mice, helping to identify whether certain mice consistently show higher activity in specific brain regions. Although the pattern is not immediately clear, it appears that Cori and Lederberg exhibit more neural activity across regions compared to Forssman and Hench, as indicated by more frequent and higher intensity red and purple spikes in the plot. This could be influenced by factors such as insert factors here. Interestingly, Hench shows more activity in certain regions, such as VISrl. This analysis accounts for individual variation among the mice to determine if naturally higher activity levels might influence their performance in stimulus success outcomes.
+
+<details>
+  <summary><strong>Click to View the Mouse to Mouse Plot</strong></summary>
+  <br>
+```{r mouse2mouse, echo = F}
+mouse_area_rates <- sample_trials_long %>%
+  group_by(mouse_name, brain_area) %>%
+  summarize(
+    avg_rate = mean(spike_rate, na.rm = TRUE),
+    sd_rate = sd(spike_rate, na.rm = TRUE)
+  )
+
+# Plot average spike rates by mouse and brain area
+ggplot(mouse_area_rates, aes(x = brain_area, y = avg_rate, fill = mouse_name)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_errorbar(aes(ymin = avg_rate - sd_rate, ymax = avg_rate + sd_rate), 
+                position = position_dodge(0.9), width = 0.25) +
+  labs(title = "Average Spike Rates by Mouse and Brain Area",
+       x = "Brain Area", y = "Average Spike Rate",
+       fill = "Mouse") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+</details>
+
+<br>
+
+
+**Stimuli and Success Rate**
+
+The heatmap below displays the success rates based on the contrast combinations of stimuli. From this heatmap, we can observe that the combinations with the highest success rates are those with larger contrast differences, which mirrors the findings from the stimulus condition analysis plot. For example, combinations such as 0.5 & 0, 1 & 0, and 0.25 & 1 all have success rates ranging from 0.7 to 0.85. In contrast, combinations with smaller contrast differences, such as 0.5 & 0.25, show a lower success rate of around 0.63, regardless of whether the higher contrast is on the left or right side. This suggests that a greater difference between contrasts leads to a higher success rate in mice.
+
+An interesting pattern observed in the heatmap is that mice tend to have a higher success rate when the higher contrast is presented on the left side, rather than the right. For instance, when the left stimulus is set to 1 and the right stimulus is set to 0, the success rate is 0.84, while the inverse (left at 0 and right at 1) results in a success rate of 0.75. This difference highlights an interesting trend in how contrast orientation may affect the mice's ability to succeed in the task.
+
+<details>
+  <summary><strong>Click to View the Heatmap</strong></summary>
+  <br>
+```{r heatmape, echo = F}
+stimuli_success <- all_contrasts %>%
+  group_by(contrast_left, contrast_right) %>%
+  summarize(
+    success_rate = mean(feedback == 1),
+    trial_count = n()
+  )
+
+# Plot success rate by contrast combination
+ggplot(stimuli_success, aes(x = factor(contrast_left), y = factor(contrast_right), fill = success_rate)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  geom_text(aes(label = sprintf("%.2f\n(n=%d)", success_rate, trial_count)), size = 3) +
+  labs(title = "Success Rate by Contrast Combination",
+       x = "Left Contrast", y = "Right Contrast",
+       fill = "Success Rate") +
+  theme_minimal()
+```
+
+</details>
+
+<br>
+
+
+**Overview of EDA**
+
+The EDA examines the behavioral and neural data from the mice, focusing on key variables such as trial feedback, contrast conditions, spike counts, and brain areas. Based on all the above plots and tables, we made a few key insights regarding the data:
+
+* Session Summary: Mouse trial counts, recorded neurons, and activated brain areas varied across sessions. Lederberg had the most trials, while Cori had the fewest, which could lead to bias in modeling.
+
+* Data Structure Plots: The number of trials, neurons, and brain areas across sessions showed variability, highlighting potential data imbalances, particularly for Lederberg.
+
+* Stimulus Conditions: Larger contrast differences between the left and right visual fields led to higher success rates. The 0-0 contrast condition was the most successful overall.
+
+* Feedback: Cori showed inconsistent success but improved, while Lederberg’s performance was fluctuating but the highest. This indicates variability in task consistency among the mice.
+
+* Neural Activity: No single brain region was strongly linked to success, suggesting that multiple brain areas contribute to decision-making.
+
+* Mouse-to-Mouse Variation: Neural responses varied across mice, with some regions showing more activity, which could influence success rates.
+
+* Stimulus & Success Rate: Higher contrast differences, especially with the higher contrast on the left, correlated with better success rates.
+
+For our next steps, we will use these key findings to combine data from multiple sessions, addressing variations in trials, neurons, and brain areas.
+
+<br>
+
+## Data Integration
+
+<br>
+
+**Considerations from EDA**
+
+As we move into the data integration part of this project, we combine data across trials that effectively extracts shared patterns while addressing the differences between sessions. As seen in the EDA section above, there are several considerations to keep in mind when building the model that must be addressed in the integration process. First, there is significant variance in the number of trials across mice, with Lederberg having substantially more trials than Cori, which could result in a bias in our model toward patterns observed in mice with more data. The second consideration being the distribution of contrast combinations varies across sessions, with some configurations being tested more frequently than others. Third, different brain areas were recorded across sessions and mice, making it difficult to create consistent neural features.
+
+Despite these challenges, in the EDA, we also found several consistent patterns that can be leveraged for prediction such as the pattern between larger contrast differences and how that typically leads to higher success rates, a certain configuration with higher left contrast outperforms that with higher right contrast, and that the 0-0 contrast condition shows particularly high success rates.
+
+<br>
+
+**Feature Engineering**
+
+To address these considerations and challenges, when building my model, I engineered some features and tried to:
+ 
+* Extract shared patterns accross sessions that were more visibly extractable and obvious such as the contrast difference correlations, and the 0-0 constrast condition indicator. This was done by getting the absolute value difference between the left anr right constrasts, and capturing the directional effect for the left or right higher constrast case
+
+* I also addressed differences between sessions by weighting trial with respect to the mouse's trial counts, the mouse-specific performing metrics, and the trial progression features to account for the differences in trial counts accross the micee and the variations across mice. This was done by taking into account the mouses's average success to create a baseline performance measure for each mouse, and then capture any learning effects within the mouse as seen through progressions of each trial. I also took into account any inter-session patterns and the disbalanced trial counts per mouse by assigning trial weights that were inversely relational to the mice's trial counts (so the more trials a mouse has, the less weight it has to minimize skew). 
+
+<br>
+
+**Interpretations of Results**
+
+Based on the visualizations seen below in the drop-down menu, we can see that the integrated dataset still maintains the key relationships and patterns seen during EDA. 
+
+The first table suggests that the contrast difference variable indeed has the strongest correlation with the trial outcome with a coefficient of 0.139, closely followed by the session progression coefficient of 0.138. Furthermore, the left-higher indicator of 0.073  shows a stronger correlation to the trial outcomes than the right-higher indicator of 0.053, confirming the asymmetric effect observed in the EDA. 
+
+The next plot shows the right versus left contrast effect. Almost all mice, with the exception of Forssman, show that there is a higher success rate when the left contrast is more than the right contrast. For example, Cori shows around a 75% success rate for left-high simulations compared to his 58% right-higher simulations. 
+
+The next image visualizes the relatiionship between the contrast diffeence and the success rate, which is preserved as larger differences in the contrast lead to higher success rates. However, it is to be noted that Lederberg has the strongest performance across all the different constrast differences where as Cori and Hench have a little more variability. 
+
+The fourth image is a plot describing the right-zero conditions suggesting that the simulations in which the right side is 0 and the left side is more than 0, have the highest success rates of around 80%. This follows our first observation and visualization where we observed that there seems to be a higher success rate when the left contrast is more than the right contrast. The next "most successful" configuration is when the left is 0, also support the idea that the higher the difference of contrast, the higher the success rate typically is. Both of these conditions do better than the condition in which both the stimulus are 0 or both of them are more than 0, which further reinforces the idea that the larger contrast difference is important and highlights the importance of this configuration not previously noticed. 
+
+The last visualization shows the variability in the learning patterns across the mice, with some mice like Lederberg impriving overtime and others have more fluctaion. This means that using the weighting approach will be good to ensure that these patterns are accounted for when developing the predictive model despite the trial count imabalnces. 
+
+```{r, include = F}
+#used claude to generate this
+# Step 1: Extract reliable features from all sessions
+integrated_data <- data.frame()
+
+# Process each session
+for(i in 1:length(session)) {
+  cat(paste0("Processing session ", i, "...\n"))
+  s <- session[[i]]
+  
+  # Extract trial metadata
+  session_data <- data.frame(
+    session_id = i,
+    mouse_name = s$mouse_name,
+    contrast_left = s$contrast_left,
+    contrast_right = s$contrast_right,
+    feedback_type = s$feedback_type,
+    trial_id = 1:length(s$feedback_type)
+  )
+  
+  # Add derived contrast features - focusing on specific EDA findings
+  session_data$contrast_diff <- abs(session_data$contrast_left - session_data$contrast_right)
+  
+  # Capture the left vs right effect identified in EDA
+  session_data$left_higher <- as.numeric(session_data$contrast_left > session_data$contrast_right)
+  session_data$right_higher <- as.numeric(session_data$contrast_left < session_data$contrast_right)
+  
+  # Capture the special 0-0 contrast condition (high success in EDA)
+  session_data$equal_zero <- as.numeric(session_data$contrast_left == 0 & session_data$contrast_right == 0)
+  
+  # Add to overall dataset
+  integrated_data <- rbind(integrated_data, session_data)
+}
+
+# Step 2: Calculate session counts and trial counts by mouse to assess imbalance
+mouse_counts <- integrated_data %>%
+  group_by(mouse_name) %>%
+  summarize(
+    session_count = n_distinct(session_id),
+    trial_count = n(),
+    .groups = 'drop'
+  )
+
+cat("Mouse session and trial counts:\n")
+print(mouse_counts)
+
+# Step 3: Calculate trial weights to address imbalance
+integrated_data <- integrated_data %>%
+  group_by(mouse_name) %>%
+  mutate(
+    # Weights inversely proportional to trial count
+    trial_weight = 1 / n()
+  ) %>%
+  ungroup() %>%
+  # Rescale weights to sum to total number of trials
+  mutate(trial_weight = trial_weight * nrow(integrated_data) / sum(trial_weight))
+
+# Step 4: Add mouse-specific and temporal features
+integrated_data <- integrated_data %>%
+  group_by(mouse_name) %>%
+  mutate(
+    # Mouse-specific performance metric
+    mouse_avg_success = mean(feedback_type == 1, na.rm = TRUE),
+    
+    # Track trial progression for learning effects 
+    trial_within_mouse = 1:n(),
+    
+    # Normalize trial progression to [0,1] to account for different trial counts
+    normalized_progress = (1:n()) / n()
+  ) %>%
+  ungroup() %>%
+  group_by(session_id) %>%
+  mutate(
+    # Track progress within session
+    session_progress = (trial_id - min(trial_id)) / (max(trial_id) - min(trial_id) + 1)
+  ) %>%
+  ungroup()
+```
+
+<details>
+  <summary><strong>Click to View the Data Integration Outputs</strong></summary>
+  <br>
+```{r visualizations, echo = F}
+
+# Step 5: Feature importance analysis
+cat("\nCorrelation of key features with feedback_type:\n")
+cor_cols <- setdiff(names(integrated_data), c("feedback_type", "session_id", "trial_id", "mouse_name"))
+cor_with_feedback <- sapply(integrated_data[, cor_cols], 
+                          function(x) cor(x, integrated_data$feedback_type, use = "complete.obs"))
+top_features <- sort(abs(cor_with_feedback), decreasing = TRUE)
+print(top_features)
+
+# Step 6: Save the integrated dataset
+cat("\nFinal integrated dataset dimensions:", dim(integrated_data)[1], "rows,", 
+    dim(integrated_data)[2], "columns\n")
+saveRDS(integrated_data, "./integrated_data.rds")
+
+# Step 7: Create visualizations to validate the integration approach
+
+# 7.1 Left vs Right contrast effect (key finding from EDA)
+left_right_effect <- integrated_data %>%
+  filter(left_higher == 1 | right_higher == 1) %>%  # Exclude equal contrast
+  group_by(mouse_name, left_higher) %>%
+  summarize(
+    success_rate = mean(feedback_type == 1),
+    trial_count = n(),
+    .groups = 'drop'
+  ) %>%
+  mutate(contrast_config = ifelse(left_higher == 1, "Left Higher", "Right Higher"))
+
+# Plot left vs right effect
+p1 <- ggplot(left_right_effect, aes(x = contrast_config, y = success_rate, fill = mouse_name)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(aes(label = sprintf("n=%d", trial_count)), 
+            position = position_dodge(width = 0.9), vjust = -0.5, size = 3) +
+  labs(title = "Success Rate: Left vs Right Higher Contrast",
+       subtitle = "Consistent pattern across mice preserved in integration",
+       x = "Contrast Configuration", y = "Success Rate") +
+  theme_minimal()
+print(p1)
+
+# 7.2 Success rate by contrast difference
+contrast_success <- integrated_data %>%
+  group_by(mouse_name, contrast_diff) %>%
+  summarize(
+    success_rate = mean(feedback_type == 1),
+    trial_count = n(),
+    .groups = 'drop'
+  )
+
+p2 <- ggplot(contrast_success, aes(x = contrast_diff, y = success_rate, size = trial_count, color = mouse_name)) +
+  geom_point(alpha = 0.7) +
+  geom_smooth(method = "loess", se = FALSE, aes(weight = trial_count)) +
+  labs(title = "Success Rate by Contrast Difference",
+       x = "Contrast Difference", y = "Success Rate") +
+  theme_minimal()
+print(p2)
+
+# 7.3 Zero-contrast condition success
+zero_contrast <- integrated_data %>%
+  mutate(contrast_condition = case_when(
+    equal_zero == 1 ~ "Both Zero",
+    contrast_left == 0 & contrast_right > 0 ~ "Left Zero",
+    contrast_left > 0 & contrast_right == 0 ~ "Right Zero",
+    TRUE ~ "Both Non-Zero"
+  )) %>%
+  group_by(contrast_condition) %>%
+  summarize(
+    success_rate = mean(feedback_type == 1),
+    trial_count = n(),
+    .groups = 'drop'
+  )
+
+p3 <- ggplot(zero_contrast, aes(x = reorder(contrast_condition, -success_rate), 
+                         y = success_rate, fill = contrast_condition)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = sprintf("n=%d", trial_count)), vjust = -0.5) +
+  labs(title = "Success Rate by Zero-Contrast Conditions",
+       x = "Contrast Condition", y = "Success Rate") +
+  theme_minimal() +
+  theme(legend.position = "none")
+print(p3)
+
+# 7.4 Learning effects visualization
+learning_effects <- integrated_data %>%
+  # Create bins of normalized progress
+  mutate(progress_bin = cut(normalized_progress, breaks = 10)) %>%
+  group_by(mouse_name, progress_bin) %>%
+  # Use weights to adjust for trial imbalance
+  summarize(
+    weighted_success = weighted.mean(feedback_type == 1, w = trial_weight),
+    unweighted_success = mean(feedback_type == 1),
+    bin_center = mean(normalized_progress),
+    .groups = 'drop'
+  )
+
+# Convert to long format for easier plotting
+learning_effects_long <- learning_effects %>%
+  pivot_longer(cols = c(weighted_success, unweighted_success),
+               names_to = "calculation",
+               values_to = "success_rate")
+
+p4 <- ggplot(learning_effects_long, aes(x = bin_center, y = success_rate, 
+                                color = mouse_name, linetype = calculation)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Learning Effects: Success Rate Over Trial Progression",
+       x = "Normalized Trial Progression", y = "Success Rate") +
+  theme_minimal()
+print(p4)
+```
+</details>
+
+<br>
+
+
+## Predictive Modeling
+<br>
+
+**Process**
+
+Building on the integrated dataset that successfully combines information across all 18 sessions, we now proceed to the final phase of our analysis which is developing a predictive model for trial outcomes. 
+
+As seen above, our data integration approach preserved the key patterns identified in the EDA; particularly the contrast difference effect, left-higher advantage, and mouse-specific performance variations—while addressing the challenges of imbalanced trial counts and session-specific differences. By leveraging this unified dataset and its relevant and carefully engineered features and trial weighting strategy, we can build an effective prediction model that can leverage information across all sessions to accurately classify trial outcomes.
+
+**Interpretations**
+
+Based on the visualizations provided in the drop down menu below, we can see some key features on each. 
+
+In the first image, we can see that session progression emerged as the most influential predictor by a large mergin, followed by contrast difference and mouse-specific factors (particularly Lederberg). This suggests that learning effects play a more significant role in trial outcomes than initially anticipated. The relatively low importance of the left_higher and right_higher indicators, despite their correlation with outcomes in the EDA, suggests that these effects are captured more effectively by other features in the model.
+
+The second image is about the contrast dependent accuracy in which we can see that there is a clear positive relationship with contrast difference, increasing from approximately 65% at zero difference to nearly 85% at maximum difference. This confirms our EDA finding that larger contrast differences facilitate more consistent decision-making in mice, likely by providing clearer sensory signals for discrimination.
+
+The third image records the mouse-sepcfic performance patterns in which prediction accuracy varies significantly across mice, with Lederberg showing the highest accuracy (80%) and Cori the lowest (68%). This aligns with our EDA observation that Lederberg exhibited more stable performance throughout the experiment. The sample sizes for each mouse (n=405 for Lederberg vs. n=114 for Cori) reflect the trial count imbalance identified in our data integration phase.
+
+The last image shows the left-right constrast symmetry pattern in which we can see that the model has a higher accuracy on trials where the left contrast exceeds the right contrast (80.5% vs. 70.6%), providing further evidence for a lateral bias in visual processing. This asymmetry, consistently observed across our analyses, suggests a fundamental aspect of how mice process visual information in this decision-making task.
+
+**Conclusion**
+
+The Random Forest model's overall accuracy of 74.2% demonstrates that our integrated dataset effectively captures the key patterns in mouse decision-making. However, the model's lower recall for failure cases (16.7%) indicates that predicting unsuccessful trials remains challenging, possibly because these failures arise from more complicated patterns not fully captured by our current feature st.
+
+These results not only validate the patterns identified in our exploratory analysis but also provide solidified evidence for the relative importance of different factors in driving trial outcomes. Surprisingly, the prevalence of session progression in feature importance highlights the inherent nature of decision-making, with mice continually adapting their strategies throughout the experiment.
+
+
+```{r, include = F}
+#used claude
+
+# Load the integrated dataset
+integrated_data <- readRDS("./integrated_data.rds")
+
+# Prepare data for modeling
+model_data <- integrated_data %>%
+  select(
+    # Target variable
+    feedback_type,
+    
+    # Contrast-related features (key findings from EDA)
+    contrast_diff, contrast_left, contrast_right, 
+    left_higher, right_higher, equal_zero,
+    
+    # Mouse-specific and temporal features
+    mouse_name, session_id, trial_weight,
+    mouse_avg_success, session_progress, 
+    normalized_progress, trial_within_mouse
+  )
+
+# Convert feedback_type to a factor for classification
+model_data$feedback_type <- factor(model_data$feedback_type, levels = c(-1, 1), 
+                                 labels = c("Failure", "Success"))
+
+# Convert mouse_name to a factor
+model_data$mouse_name <- as.factor(model_data$mouse_name)
+
+# Split data into training and validation sets
+set.seed(141) # For reproducibility
+train_idx <- createDataPartition(model_data$feedback_type, p = 0.8, list = FALSE)
+train_data <- model_data[train_idx, ]
+valid_data <- model_data[-train_idx, ]
+
+# Function to evaluate model performance
+evaluate_model <- function(predictions, actual, model_name) {
+  # Calculate metrics
+  conf_matrix <- confusionMatrix(predictions, actual)
+  accuracy <- conf_matrix$overall["Accuracy"]
+  precision <- conf_matrix$byClass["Pos Pred Value"]
+  recall <- conf_matrix$byClass["Sensitivity"]
+  f1_score <- 2 * (precision * recall) / (precision + recall)
+  
+  # ROC curve and AUC
+  pred_prob <- as.numeric(predictions == "Success")
+  roc_obj <- roc(actual, pred_prob)
+  auc_value <- auc(roc_obj)
+  
+  # Return metrics
+  metrics <- data.frame(
+    Model = model_name,
+    Accuracy = accuracy,
+    Precision = precision,
+    Recall = recall,
+    F1_Score = f1_score,
+    AUC = auc_value
+  )
+  
+  return(list(metrics = metrics, conf_matrix = conf_matrix, roc = roc_obj))
+}
+
+# Set up training control for all models
+train_control <- trainControl(
+  method = "cv",
+  number = 5,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final"
+)
+
+# Train logistic regression model
+cat("\nTraining logistic regression model...\n")
+logistic_model <- train(
+  feedback_type ~ contrast_diff + contrast_left + contrast_right + 
+                  left_higher + right_higher + equal_zero + 
+                  mouse_name + session_progress + mouse_avg_success,
+  data = train_data,
+  method = "glm",
+  family = "binomial",
+  weights = train_data$trial_weight,
+  trControl = train_control,
+  metric = "ROC"
+)
+
+# Make predictions on validation set
+logistic_preds <- predict(logistic_model, valid_data)
+logistic_eval <- evaluate_model(logistic_preds, valid_data$feedback_type, "Logistic Regression")
+
+# Train random forest model
+cat("\nTraining random forest model...\n")
+rf_model <- train(
+  feedback_type ~ contrast_diff + contrast_left + contrast_right + 
+                 left_higher + right_higher + equal_zero + 
+                 mouse_name + session_progress + mouse_avg_success,
+  data = train_data,
+  method = "rf",
+  weights = train_data$trial_weight,
+  trControl = train_control,
+  metric = "ROC",
+  importance = TRUE
+)
+
+# Make predictions on validation set
+rf_preds <- predict(rf_model, valid_data)
+rf_eval <- evaluate_model(rf_preds, valid_data$feedback_type, "Random Forest")
+
+# Compare model performance
+all_metrics <- rbind(
+  logistic_eval$metrics,
+  rf_eval$metrics
+)
+
+# Print model comparison
+cat("\nModel Comparison:\n")
+print(all_metrics)
+
+# Print confusion matrix for best model (Random Forest)
+cat("\nRandom Forest Confusion Matrix:\n")
+print(rf_eval$conf_matrix)
+
+# Save the best model for future prediction
+best_model <- rf_model
+saveRDS(best_model, "./best_model.rds")
+
+# Prepare validation results for visualization
+rf_probs <- predict(rf_model, valid_data, type = "prob")
+valid_results <- valid_data %>%
+  select(mouse_name, contrast_diff, left_higher, feedback_type) %>%
+  mutate(
+    predicted = rf_preds,
+    prob_success = rf_probs$Success,
+    correct = (predicted == feedback_type)
+  )
+```
+
+
+<details>
+  <summary><strong>Click to View the Prediction Model SUmmary</strong></summary>
+  <br>
+```{r pred_model, echo = F}
+# 1. Random Forest Feature Importance
+# This visualization shows which features are most predictive
+rf_importance <- varImp(rf_model)
+plot(rf_importance, top = 10, main = "Random Forest Feature Importance")
+
+# 2. Prediction Accuracy by Contrast Difference
+# Shows how accuracy increases with contrast difference
+contrast_accuracy <- valid_results %>%
+  group_by(contrast_diff) %>%
+  summarize(
+    accuracy = mean(correct),
+    count = n(),
+    .groups = 'drop'
+  )
+
+ggplot(contrast_accuracy, aes(x = contrast_diff, y = accuracy, size = count)) +
+  geom_point() +
+  geom_smooth(method = "loess") +
+  labs(title = "Prediction Accuracy by Contrast Difference",
+       x = "Contrast Difference",
+       y = "Accuracy",
+       size = "Sample Count") +
+  theme_minimal()
+
+# 3. Prediction Accuracy by Mouse
+# Shows performance variations across mice
+mouse_accuracy <- valid_results %>%
+  group_by(mouse_name) %>%
+  summarize(
+    accuracy = mean(correct),
+    count = n(),
+    .groups = 'drop'
+  )
+
+ggplot(mouse_accuracy, aes(x = mouse_name, y = accuracy, fill = mouse_name)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = sprintf("n=%d", count)), vjust = -0.5) +
+  labs(title = "Prediction Accuracy by Mouse",
+       x = "Mouse",
+       y = "Accuracy") +
+  theme_minimal()
+
+# 4. Prediction Accuracy by Left vs Right Higher Contrast
+# Confirms the left-side advantage found in EDA
+error_by_contrast <- valid_results %>%
+  group_by(left_higher, correct) %>%
+  summarize(
+    count = n(),
+    .groups = 'drop'
+  ) %>%
+  group_by(left_higher) %>%
+  mutate(
+    total = sum(count),
+    percentage = count / total * 100
+  )
+
+ggplot(error_by_contrast, aes(x = factor(left_higher), y = percentage, fill = correct)) +
+  geom_bar(stat = "identity", position = "stack") +
+  geom_text(aes(label = sprintf("%.1f%%", percentage)), 
+            position = position_stack(vjust = 0.5)) +
+  labs(title = "Prediction Accuracy by Left vs Right Higher Contrast",
+       x = "Left Higher Contrast (1=Yes, 0=No)",
+       y = "Percentage",
+       fill = "Correct Prediction") +
+  theme_minimal()
+
+# Function to prepare for test data prediction when it becomes available
+prepare_test_prediction <- function() {
+  cat("\nModel is ready for test data prediction.\n")
+}
+
+prepare_test_prediction()
+```
+</details>
+
+<br>
+<br>
+
+## Prediction Performance
+
+**Conclusion**
+
+
+
+<br>
+
+## Discussion
+
+
+
+
+#### References
+Article: https://www.nature.com/articles/s41586-019-1787-x
+Used AI to help with code and content: https://chatgpt.com/share/67d8a4f9-e5f0-800d-acd7-9ebeabc767a6
+Utilized Claude to help with code generation and some paraphrasing and interpretations.
+
+
+
+**Project GitHub Link: ** https://github.com/priyanshisinghh/STA141A-Project
