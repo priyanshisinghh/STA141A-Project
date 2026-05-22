@@ -161,7 +161,3 @@ These results not only validate the patterns identified in our exploratory analy
 ![Prediction Model Summary Part 1](images/PredModelSum1.png)
 ![Prediction Model Summary Part 2](images/PredModelSum2.png)
 
-# Next Steps
-
-The next steps of this project would be to test the prediction performance of our model.
-
